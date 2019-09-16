@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 from __future__ import print_function
 
-import configparser
 import datetime
 import hashlib
 import hmac
@@ -11,6 +10,7 @@ import re
 import sys
 
 import configargparse
+import configparser
 import requests
 __author__ = 'iokulist'
 
@@ -24,12 +24,12 @@ def __log(*args, **kwargs):
     pp.pprint(*args, **kwargs)
 
 
-def __url_path_to_dict(path):
+def url_path_to_dict(path):
     """http://stackoverflow.com/a/17892757/142207"""
 
     pattern = (r'^'
                r'((?P<schema>.+?)://)?'
-               r'((?P<user>.+?)(:(?P<password>.*?))?@)?'
+               r'((?P<user>[^/]+?)(:(?P<password>[^/]*?))?@)?'
                r'(?P<host>.*?)'
                r'(:(?P<port>\d+?))?'
                r'(?P<path>/.*?)?'
@@ -80,7 +80,7 @@ def make_request(method,
     See also: http://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html
     """
 
-    uri_dict = __url_path_to_dict(uri)
+    uri_dict = url_path_to_dict(uri)
     host = uri_dict['host']
     query = uri_dict['query']
     canonical_uri = uri_dict['path']
@@ -131,9 +131,13 @@ def make_request(method,
     canonical_querystring = __normalize_query_string(query)
     __log(canonical_querystring)
 
-    fullhost = host
-    if port:
-        fullhost = host + ':' + port
+    # If the host was specified in the HTTP header, ensure that the canonical
+    # headers are set accordingly
+    if 'host' in headers:
+        fullhost = headers['host']
+    else:
+        fullhost = host + ':' + port if port else host
+
     # Step 4: Create the canonical headers and signed headers. Header names
     # and value must be trimmed and lowercase, and sorted in ASCII order.
     # Note that there is a trailing \n.
@@ -245,8 +249,16 @@ def __send_request(uri, data, headers, method, verify):
 
 
 def load_aws_config(access_key, secret_key, security_token, credentials_path, profile):
-    if access_key is None or secret_key is None or security_token is None:
+    # type: (str, str, str, str, str) -> Tuple[str, str, str]
+    """
+    Load aws credential configuration, by parsing credential file, then try to fall back to botocore,
+    by checking (access_key,secret_key) are not (None,None)
+    """
+    if access_key is None or secret_key is None:
         try:
+            exists = os.path.exists(credentials_path)
+            __log('Credentials file \'{0}\' exists \'{1}\''.format(credentials_path, exists))
+
             config = configparser.ConfigParser()
             config.read(credentials_path)
 
@@ -275,6 +287,21 @@ def load_aws_config(access_key, secret_key, security_token, credentials_path, pr
         except ValueError as e:
             __log(e)
             raise e
+
+    # try to load instance credentials using botocore
+    if access_key is None or secret_key is None:
+        try:
+            __log("loading botocore package")
+            import botocore
+        except ImportError:
+            __log("botocore package could not be loaded")
+            botocore = None
+
+        if botocore:
+            import botocore.session
+            session = botocore.session.get_session()
+            cred = session.get_credentials()
+            access_key, secret_key, security_token = cred.access_key, cred.secret_key, cred.token
 
     return access_key, secret_key, security_token
 
@@ -311,6 +338,8 @@ def main():
     parser.add_argument('--service', help='AWS service', default='execute-api')
     parser.add_argument('--access_key', env_var='AWS_ACCESS_KEY_ID')
     parser.add_argument('--secret_key', env_var='AWS_SECRET_ACCESS_KEY')
+    # AWS_SECURITY_TOKEN is deprecated, but kept for backward compatibility
+    # https://github.com/boto/botocore/blob/c76553d3158b083d818f88c898d8f6d7918478fd/botocore/credentials.py#L260-262
     parser.add_argument('--security_token', env_var='AWS_SECURITY_TOKEN')
     parser.add_argument('--session_token', env_var='AWS_SESSION_TOKEN')
 
@@ -332,6 +361,10 @@ def main():
 
     if args.header is None:
         args.header = default_headers
+
+    if args.security_token is not None:
+        args.session_token = args.security_token
+        del args.security_token
 
     headers = {k: v for (k, v) in map(lambda s: s.split(": "), args.header)}
 
@@ -356,12 +389,6 @@ def main():
         except ImportError:
             __log("couldn't find botocore package")
 
-    if args.access_key is None:
-        raise ValueError('No access key is available')
-
-    if args.secret_key is None:
-        raise ValueError('No secret key is available')
-
     r = make_request(args.request,
                      args.service,
                      args.region,
@@ -370,7 +397,7 @@ def main():
                      data,
                      args.access_key,
                      args.secret_key,
-                     args.security_token or args.session_token,
+                     args.session_token,
                      args.data_binary,
                      args.insecure
                      )
