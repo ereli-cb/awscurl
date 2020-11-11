@@ -21,7 +21,7 @@ setup(
         'requests',
         'configargparse',
         'configparser',
-        'urllib3[secure]>=1.21.1,<1.26'
+        'urllib3[secure]>=1.21.1,<1.27'
     ],
     extras_require={
         'awslibs': ["botocore"]
